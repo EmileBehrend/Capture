@@ -37,6 +37,8 @@ background_image = None
 move_rectangle = False
 mouse_x = 0
 mouse_y = 0
+draw_x = None
+draw_y = None
 
 
 def configBoard(config):
@@ -202,7 +204,7 @@ def sigint_handler(signum, frame):
 
 
 def mouse(event, x, y, flags, params):
-    global select, background_image, move_rectangle, mouse_x, mouse_y
+    global select, background_image, move_rectangle, mouse_x, mouse_y, draw_x, draw_y
     x = inborders(x, int(rectangle_width / 2), screen_width - int(rectangle_width / 2) - 1)
     y = inborders(y, int(rectangle_height / 2), screen_height - int(rectangle_height / 2) - 1)
 
@@ -216,6 +218,8 @@ def mouse(event, x, y, flags, params):
     #                                                                shifted_x + rectangle_width / 2,
     #                                                                shifted_y + rectangle_height / 2))
 
+    display_rectangle = False
+
     if event == cv2.EVENT_LBUTTONDOWN:
         move_rectangle = True
 
@@ -223,42 +227,47 @@ def mouse(event, x, y, flags, params):
         if move_rectangle:
             mouse_x = shifted_x
             mouse_y = shifted_y
-            blank = background_image.copy()
-            cv2.rectangle(blank,
-                            (
-                                x - int(rectangle_width / float(2)),
-                                y - int(rectangle_height / float(2))
-                            ),
-                            (
-                                x + int(rectangle_width / float(2)),
-                                y + int(rectangle_height / float(2))
-                            ),
-                            (0, 0, 255),
-                            1
-                         )
-            cv2.imshow(select, blank)
+            draw_x = x
+            draw_y = y
+            display_rectangle = True
 
     elif event == cv2.EVENT_LBUTTONUP:
         move_rectangle = False
+
         mouse_x = shifted_x
         mouse_y = shifted_y
-        blank = background_image.copy()
-        cv2.rectangle(blank,
-                        (
-                            x - int(rectangle_width / float(2)),
-                            y - int(rectangle_height / float(2))
-                        ),
-                        (
-                            x + int(rectangle_width / float(2)),
-                            y + int(rectangle_height / float(2))
-                        ),
-                        (0, 0, 255),
-                        1
-                     )
-        cv2.imshow(select, blank)
+        draw_x = x
+        draw_y = y
+        display_rectangle = True
 
 
-def get_focus():
+    if display_rectangle:
+        display_rectangle = False
+        draw_rectangle()
+
+def draw_rectangle():
+    global select, background_image, draw_x, draw_y
+
+    if draw_x is None or draw_y is None:
+        return
+
+    blank = background_image.copy()
+    cv2.rectangle(blank,
+                    (
+                        draw_x - int(rectangle_width / float(2)),
+                        draw_y - int(rectangle_height / float(2))
+                    ),
+                    (
+                        draw_x + int(rectangle_width / float(2)),
+                        draw_y + int(rectangle_height / float(2))
+                    ),
+                    (0, 0, 255),
+                    1
+                 )
+    cv2.imshow(select, blank)
+
+
+def capture_background():
     global handle, running, Width, Height, cfg, color_mode, select, background_image
 
     while ArducamSDK.Py_ArduCam_availableImage(handle) == 0:
@@ -271,17 +280,25 @@ def get_focus():
         print("Failed to read data!")
         exit()
 
+    ArducamSDK.Py_ArduCam_del(handle)
+
     background_image = convert_image(data, rtn_cfg, color_mode)
     background_image = cv2.resize(background_image, (screen_width, screen_height), interpolation=cv2.INTER_LINEAR)
+    return background_image
+
+def get_focus():
+    global handle, running, Width, Height, cfg, color_mode, select, background_image
 
     select = "Zone selection"
     cv2.namedWindow(select)
     cv2.setMouseCallback(select, mouse)
 
-    cv2.imshow(select, background_image)
-
     while True:
-        key = cv2.waitKey(0)
+        background_image = capture_background()
+        cv2.imshow(select, background_image)
+        draw_rectangle()
+
+        key = cv2.waitKey(10)
 
         if key == 13: # enter
             result = True
@@ -291,8 +308,6 @@ def get_focus():
             break
 
     cv2.destroyAllWindows()
-
-    ArducamSDK.Py_ArduCam_del(handle)
 
     return result and mouse_x is not None and mouse_y is not None
 
@@ -319,6 +334,7 @@ if __name__ == "__main__":
     ret, handle = camera_initFromFile(config_overview)
     if ret:
         ArducamSDK.Py_ArduCam_setMode(handle, ArducamSDK.CONTINUOUS_MODE)
+        ArducamSDK.Py_ArduCam_writeSensorReg(handle, 0x0202, 100)
 
         ct = threading.Thread(target=captureImage_thread)
         ct.start()
