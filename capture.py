@@ -42,6 +42,28 @@ draw_x = None
 draw_y = None
 
 
+def is_digit(n):
+    try:
+        int(n)
+        return True
+    except ValueError:
+        return False
+
+
+def inborders(n, min_value, max_value):
+    return max(min(n, max_value), min_value)
+
+
+def sigint_handler(signum, frame):
+    global running, handle
+    running = False
+    exit()
+
+
+signal.signal(signal.SIGINT, sigint_handler)
+signal.signal(signal.SIGTERM, sigint_handler)
+
+
 def configBoard(config):
     global handle
     ArducamSDK.Py_ArduCam_setboardConfig(handle, config.params[0],
@@ -145,6 +167,26 @@ def captureImage_thread():
     ArducamSDK.Py_ArduCam_endCaptureImage(handle)
 
 
+def capture_background():
+    global handle, running, width, height, cfg, color_mode, select, background_image
+
+    while ArducamSDK.Py_ArduCam_availableImage(handle) == 0:
+        time.sleep(0.001)
+
+    rtn_val, data, rtn_cfg = ArducamSDK.Py_ArduCam_readImage(handle)
+    datasize = rtn_cfg['u32Size']
+    if rtn_val != 0 or datasize == 0:
+        ArducamSDK.Py_ArduCam_del(handle)
+        print("Failed to read data!")
+        exit()
+
+    ArducamSDK.Py_ArduCam_del(handle)
+
+    background_image = ImageConvert.convert_image(data, rtn_cfg, color_mode)
+    background_image = cv2.resize(background_image, (screen_width, screen_height), interpolation=cv2.INTER_LINEAR)
+    return background_image
+
+
 def readImage_thread():
     global handle, running, width, height, save_single_flag, save_flag, save_beginning, save_raw, cfg, color_mode
 
@@ -213,29 +255,28 @@ def readImage_thread():
             time.sleep(0.001)
 
 
-def show_help():
-    print("Usage: python capture.py	\
-        \nWhile the program is running, you can enter the following inputs in the terminal:	\
-        \n 'h' + Enter: Display this help message.	\
-        \n 'q' + Enter: Exit the program.	\
-        \n 't' + Enter: Save a single image.	\
-        \n 's' + Enter: Start the recording.	\
-        \n 'c' + Enter: Stop the recording.	\
-        \n 'l' + Enter: Move the view to the left.	\
-        \n 'r' + Enter: Move the view to the right.	\
-        \n 'u' + Enter: Move the view up.	\
-        \n 'd' + Enter: Move the view down.	\
-        \n 'w' + Enter: Increase coarse_integration time.	\
-        \n 'b' + Enter: Decrease coarse_integration time.	\
-        \n 'p' + Enter: Save the current parameters.	\
-        \n '[number]' + Enter: Change the shifting value to [number].	\
-        ")
+def draw_rectangle(output=True):
+    global select, background_image, draw_x, draw_y
 
+    if draw_x is None or draw_y is None:
+        return
 
-def sigint_handler(signum, frame):
-    global running, handle
-    running = False
-    exit()
+    blank = background_image.copy()
+    cv2.rectangle(blank,
+                  (
+                      draw_x - int(rectangle_width / float(2)),
+                      draw_y - int(rectangle_height / float(2))
+                  ),
+                  (
+                      draw_x + int(rectangle_width / float(2)),
+                      draw_y + int(rectangle_height / float(2))
+                  ),
+                  (0, 0, 255),
+                  1
+                  )
+
+    cv2.imshow(select, blank)
+    return blank
 
 
 def mouse(event, x, y, flags, params):
@@ -273,50 +314,6 @@ def mouse(event, x, y, flags, params):
         draw_rectangle()
 
 
-def draw_rectangle(output=True):
-    global select, background_image, draw_x, draw_y
-
-    if draw_x is None or draw_y is None:
-        return
-
-    blank = background_image.copy()
-    cv2.rectangle(blank,
-                  (
-                      draw_x - int(rectangle_width / float(2)),
-                      draw_y - int(rectangle_height / float(2))
-                  ),
-                  (
-                      draw_x + int(rectangle_width / float(2)),
-                      draw_y + int(rectangle_height / float(2))
-                  ),
-                  (0, 0, 255),
-                  1
-                  )
-
-    cv2.imshow(select, blank)
-    return blank
-
-
-def capture_background():
-    global handle, running, width, height, cfg, color_mode, select, background_image
-
-    while ArducamSDK.Py_ArduCam_availableImage(handle) == 0:
-        time.sleep(0.001)
-
-    rtn_val, data, rtn_cfg = ArducamSDK.Py_ArduCam_readImage(handle)
-    datasize = rtn_cfg['u32Size']
-    if rtn_val != 0 or datasize == 0:
-        ArducamSDK.Py_ArduCam_del(handle)
-        print("Failed to read data!")
-        exit()
-
-    ArducamSDK.Py_ArduCam_del(handle)
-
-    background_image = ImageConvert.convert_image(data, rtn_cfg, color_mode)
-    background_image = cv2.resize(background_image, (screen_width, screen_height), interpolation=cv2.INTER_LINEAR)
-    return background_image
-
-
 def get_focus():
     global handle, running, width, height, cfg, color_mode, select, background_image
 
@@ -346,20 +343,23 @@ def get_focus():
     return result
 
 
-signal.signal(signal.SIGINT, sigint_handler)
-signal.signal(signal.SIGTERM, sigint_handler)
-
-
-def is_digit(n):
-    try:
-        int(n)
-        return True
-    except ValueError:
-        return False
-
-
-def inborders(n, min_value, max_value):
-    return max(min(n, max_value), min_value)
+def show_help():
+    print("Usage: python capture.py	\
+        \nWhile the program is running, you can enter the following inputs in the terminal:	\
+        \n 'h' + Enter: Display this help message.	\
+        \n 'q' + Enter: Exit the program.	\
+        \n 't' + Enter: Save a single image.	\
+        \n 's' + Enter: Start the recording.	\
+        \n 'c' + Enter: Stop the recording.	\
+        \n 'l' + Enter: Move the view to the left.	\
+        \n 'r' + Enter: Move the view to the right.	\
+        \n 'u' + Enter: Move the view up.	\
+        \n 'd' + Enter: Move the view down.	\
+        \n 'w' + Enter: Increase coarse_integration time.	\
+        \n 'b' + Enter: Decrease coarse_integration time.	\
+        \n 'p' + Enter: Save the current parameters.	\
+        \n '[number]' + Enter: Change the shifting value to [number].	\
+        ")
 
 
 if __name__ == "__main__":
