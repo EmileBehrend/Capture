@@ -13,9 +13,6 @@ import ImageConvert
 
 sys.setrecursionlimit(10 ** 9)
 
-
-global cfg, handle, running, Width, Heigth, save_single_flag, save_flag, save_beginning, save_raw, color_mode
-
 settings_file = "recording_settings.json"
 
 running = True
@@ -52,21 +49,21 @@ def configBoard(config):
                                          config.params[4:config.params_length])
 
 
-def camera_initFromFile(fileName, pWidth=None, pHeight=None):
-    global cfg, handle, Width, Height, color_mode, save_raw
+def camera_initFromFile(fileName, p_width=None, p_height=None):
+    global cfg, handle, width, height, color_mode, save_raw
     config = arducam_config_parser.LoadConfigFile(fileName)
 
     camera_parameter = config.camera_param.getdict()
 
-    if pWidth is None:
-        Width = camera_parameter["WIDTH"]
+    if p_width is None:
+        width = camera_parameter["WIDTH"]
     else:
-        Width = pWidth
+        width = p_width
 
-    if pHeight is None:
-        Height = camera_parameter["HEIGHT"]
+    if p_height is None:
+        height = camera_parameter["HEIGHT"]
     else:
-        Height = pHeight
+        height = p_height
 
     BitWidth = camera_parameter["BIT_WIDTH"]
     ByteLength = 1
@@ -82,8 +79,8 @@ def camera_initFromFile(fileName, pWidth=None, pHeight=None):
     TransLvl = camera_parameter["TRANS_LVL"]
     cfg = {
         "u32CameraType": 0x00,
-        "u32Width": Width,
-        "u32Height": Height,
+        "u32Width": width,
+        "u32Height": height,
         "usbType": 0,
         "u8PixelBytes": ByteLength,
         "u16Vid": 0,
@@ -149,7 +146,7 @@ def captureImage_thread():
 
 
 def readImage_thread():
-    global handle, running, Width, Height, save_single_flag, save_flag, save_beginning, save_raw, cfg, color_mode
+    global handle, running, width, height, save_single_flag, save_flag, save_beginning, save_raw, cfg, color_mode
 
     time0 = time.time()
     time1 = time.time()
@@ -191,7 +188,7 @@ def readImage_thread():
             count += 1
 
             if save_single_flag:
-                cv2.imwrite("images/single%d.png" % single_count, image)
+                cv2.imwrite("images/_single%d.png" % single_count, image)
                 print("Single image #%d saved." % (single_count))
 
                 single_count += 1
@@ -207,7 +204,7 @@ def readImage_thread():
 
                 totalFrame += 1
 
-            image = cv2.resize(image, (Width, Height), interpolation=cv2.INTER_LINEAR)
+            image = cv2.resize(image, (width, height), interpolation=cv2.INTER_LINEAR)
 
             cv2.imshow("ArduCam output", image)
             cv2.waitKey(10)
@@ -301,7 +298,7 @@ def draw_rectangle(output=True):
 
 
 def capture_background():
-    global handle, running, Width, Height, cfg, color_mode, select, background_image
+    global handle, running, width, height, cfg, color_mode, select, background_image
 
     while ArducamSDK.Py_ArduCam_availableImage(handle) == 0:
         time.sleep(0.001)
@@ -321,7 +318,7 @@ def capture_background():
 
 
 def get_focus():
-    global handle, running, Width, Height, cfg, color_mode, select, background_image
+    global handle, running, width, height, cfg, color_mode, select, background_image
 
     select = "Zone selection"
     cv2.namedWindow(select)
