@@ -1,23 +1,27 @@
-import sys
-import os
-import time
-import cv2
-import threading
-import numpy as np
-import signal
 import json
-from ImageConvert import *
+import os
+import signal
+import sys
+import threading
+import time
+
+import cv2
+
 import arducam_config_parser
 import ArducamSDK
-import math
-
+import ImageConvert
 
 sys.setrecursionlimit(10 ** 9)
 
 
-global cfg, handle, running, Width, Heigth, save_flag, color_mode, save_raw
+global cfg, handle, running, Width, Heigth, save_single_flag, save_flag, save_beginning, save_raw, color_mode
+
+settings_file = "recording_settings.json"
+
 running = True
+save_single_flag = False
 save_flag = False
+save_beginning = 0
 save_raw = False
 cfg = {}
 handle = {}
@@ -29,8 +33,8 @@ resize_ratio = float(1200) / float(3664)
 rectangle_width = float(916) * resize_ratio
 rectangle_height = float(686) * resize_ratio
 
-print("Screen: %d * %d" % (screen_width, screen_height))
-print("Rectangle: %d * %d" % (rectangle_width, rectangle_height))
+print("Screen size: %d * %d." % (screen_width, screen_height))
+print("Rectangle size: %d * %d." % (rectangle_width, rectangle_height))
 
 select = None
 background_image = None
@@ -71,7 +75,7 @@ def camera_initFromFile(fileName, pWidth=None, pHeight=None):
         save_raw = True
     FmtMode = camera_parameter["FORMAT"][0]
     color_mode = camera_parameter["FORMAT"][1]
-    print("color mode", color_mode)
+    print("Color mode: %d." % (color_mode))
 
     I2CMode = camera_parameter["I2C_MODE"]
     I2cAddr = camera_parameter["I2C_ADDR"]
@@ -110,13 +114,13 @@ def camera_initFromFile(fileName, pWidth=None, pHeight=None):
 
         rtn_val, datas = ArducamSDK.Py_ArduCam_readUserData(
             handle, 0x400 - 16, 16)
-        print("Serial: %c%c%c%c-%c%c%c%c-%c%c%c%c" % (datas[0], datas[1], datas[2], datas[3],
-                                                      datas[4], datas[5], datas[6], datas[7],
-                                                      datas[8], datas[9], datas[10], datas[11]))
+        print("Serial: %c%c%c%c-%c%c%c%c-%c%c%c%c." % (datas[0], datas[1], datas[2], datas[3],
+                                                       datas[4], datas[5], datas[6], datas[7],
+                                                       datas[8], datas[9], datas[10], datas[11]))
 
         return True, handle
     else:
-        print("open fail, rtn_val = ", ret)
+        print("Failed to open, return value: %s." % (ret))
         return False, handle
 
 
@@ -125,17 +129,17 @@ def captureImage_thread():
 
     rtn_val = ArducamSDK.Py_ArduCam_beginCaptureImage(handle)
     if rtn_val != 0:
-        print("Error beginning capture, rtn_val = ", rtn_val)
+        print("Failed to begin capture, return value: %s." % (rtn_val))
         running = False
         return
     else:
-        print("Capture began, rtn_val = ", rtn_val)
+        print("Capture began: %s." % (rtn_val))
 
     while running:
         # print "capture"
         rtn_val = ArducamSDK.Py_ArduCam_captureImage(handle)
         if rtn_val > 255:
-            print("Error while capturing image, rtn_val = ", rtn_val)
+            print("Error while capturing image: %s." % (rtn_val))
             if rtn_val == ArducamSDK.USB_CAMERA_USB_TASK_ERROR:
                 break
         time.sleep(0.005)
@@ -145,37 +149,62 @@ def captureImage_thread():
 
 
 def readImage_thread():
-    global handle, running, Width, Height, save_flag, cfg, color_mode, save_raw
-    count = 0
-    totalFrame = 0
+    global handle, running, Width, Height, save_single_flag, save_flag, save_beginning, save_raw, cfg, color_mode
+
     time0 = time.time()
     time1 = time.time()
+    single_count = 0
+    count = 0
+    totalFrame = 0
+
     data = {}
+
     cv2.namedWindow("ArduCam output", 1)
+
     if not os.path.exists("images"):
         os.makedirs("images")
+
     while running:
         if ArducamSDK.Py_ArduCam_availableImage(handle) > 0:
             rtn_val, data, rtn_cfg = ArducamSDK.Py_ArduCam_readImage(handle)
             datasize = rtn_cfg['u32Size']
             if rtn_val != 0 or datasize == 0:
                 ArducamSDK.Py_ArduCam_del(handle)
-                print("read data fail!")
+                print("Failed to read data.")
                 continue
 
-            image = convert_image(data, rtn_cfg, color_mode)
+            image = ImageConvert.convert_image(data, rtn_cfg, color_mode)
 
             time1 = time.time()
-            if time1 - time0 >= 1:
-                print("Frames per second: %d/s." % (count))
+            interval = 3  # compute framerate every [interval] seconds
+            if time1 - time0 >= interval:
+                if save_flag:
+                    elapsed_time = time.time() - save_beginning
+
+                    print("Frames per second: %d/s (#%d to #%d), elapsed time: %ds." % (count / interval, totalFrame - count, totalFrame, elapsed_time))
+                else:
+                    print("Frames per second: %d/s." % (count / interval))
+
                 count = 0
                 time0 = time1
+
             count += 1
+
+            if save_single_flag:
+                cv2.imwrite("images/single%d.png" % single_count, image)
+                print("Single image #%d saved." % (single_count))
+
+                single_count += 1
+
+                save_single_flag = False
+
             if save_flag:
                 cv2.imwrite("images/image%d.png" % totalFrame, image)
+
                 if save_raw:
                     with open("images/image%d.raw" % totalFrame, 'wb') as f:
                         f.write(data)
+
                 totalFrame += 1
 
             image = cv2.resize(image, (Width, Height), interpolation=cv2.INTER_LINEAR)
@@ -187,14 +216,23 @@ def readImage_thread():
             time.sleep(0.001)
 
 
-def showHelp():
-    print(" usage: sudo python ArduCam_Py_Demo.py <path/config-file-name>	\
-        \n\n example: sudo python ArduCam_Py_Demo.py ../../../python_config/AR0134_960p_Color.json	\
-        \n\n While the program is running, you can press the following buttons in the terminal:	\
-        \n\n 's' + Enter:Save the image to the images folder.	\
-        \n\n 'c' + Enter:Stop saving images.	\
-        \n\n 'q' + Enter:Stop running the program.	\
-        \n\n")
+def show_help():
+    print("Usage: python capture.py	\
+        \nWhile the program is running, you can enter the following inputs in the terminal:	\
+        \n 'h' + Enter: Display this help message.	\
+        \n 'q' + Enter: Exit the program.	\
+        \n 't' + Enter: Save a single image.	\
+        \n 's' + Enter: Start the recording.	\
+        \n 'c' + Enter: Stop the recording.	\
+        \n 'l' + Enter: Move the view to the left.	\
+        \n 'r' + Enter: Move the view to the right.	\
+        \n 'u' + Enter: Move the view up.	\
+        \n 'd' + Enter: Move the view down.	\
+        \n 'w' + Enter: Increase coarse_integration time.	\
+        \n 'b' + Enter: Decrease coarse_integration time.	\
+        \n 'p' + Enter: Save the current parameters.	\
+        \n '[number]' + Enter: Change the shifting value to [number].	\
+        ")
 
 
 def sigint_handler(signum, frame):
@@ -210,13 +248,6 @@ def mouse(event, x, y, flags, params):
 
     shifted_x = - x + screen_width
     shifted_y = y
-
-    # print("center: %d; %d, top right: %d; %d, bottom left: %d; %d" % (shifted_x,
-    #                                                                shifted_y,
-    #                                                                shifted_x - rectangle_width / 2,
-    #                                                                shifted_y - rectangle_height / 2,
-    #                                                                shifted_x + rectangle_width / 2,
-    #                                                                shifted_y + rectangle_height / 2))
 
     display_rectangle = False
 
@@ -240,12 +271,12 @@ def mouse(event, x, y, flags, params):
         draw_y = y
         display_rectangle = True
 
-
     if display_rectangle:
         display_rectangle = False
         draw_rectangle()
 
-def draw_rectangle():
+
+def draw_rectangle(output=True):
     global select, background_image, draw_x, draw_y
 
     if draw_x is None or draw_y is None:
@@ -253,18 +284,20 @@ def draw_rectangle():
 
     blank = background_image.copy()
     cv2.rectangle(blank,
-                    (
-                        draw_x - int(rectangle_width / float(2)),
-                        draw_y - int(rectangle_height / float(2))
-                    ),
-                    (
-                        draw_x + int(rectangle_width / float(2)),
-                        draw_y + int(rectangle_height / float(2))
-                    ),
-                    (0, 0, 255),
-                    1
-                 )
+                  (
+                      draw_x - int(rectangle_width / float(2)),
+                      draw_y - int(rectangle_height / float(2))
+                  ),
+                  (
+                      draw_x + int(rectangle_width / float(2)),
+                      draw_y + int(rectangle_height / float(2))
+                  ),
+                  (0, 0, 255),
+                  1
+                  )
+
     cv2.imshow(select, blank)
+    return blank
 
 
 def capture_background():
@@ -282,9 +315,10 @@ def capture_background():
 
     ArducamSDK.Py_ArduCam_del(handle)
 
-    background_image = convert_image(data, rtn_cfg, color_mode)
+    background_image = ImageConvert.convert_image(data, rtn_cfg, color_mode)
     background_image = cv2.resize(background_image, (screen_width, screen_height), interpolation=cv2.INTER_LINEAR)
     return background_image
+
 
 def get_focus():
     global handle, running, Width, Height, cfg, color_mode, select, background_image
@@ -293,27 +327,31 @@ def get_focus():
     cv2.namedWindow(select)
     cv2.setMouseCallback(select, mouse)
 
+    exited = False
     while True:
         background_image = capture_background()
-        cv2.imshow(select, background_image)
-        draw_rectangle()
+        overview = draw_rectangle()
 
         key = cv2.waitKey(10)
 
-        if key == 13: # enter
-            result = True
+        if key == 13:  # enter
             break
-        elif key == 27 & 0xFF: # escape
-            result = False
+        elif key == 27 & 0xFF:  # escape
+            exited = True
             break
+
+    result = not exited and mouse_x is not None and mouse_y is not None
+    if result:
+        cv2.imwrite("images/_overview.png", overview)
 
     cv2.destroyAllWindows()
 
-    return result and mouse_x is not None and mouse_y is not None
+    return result
 
 
 signal.signal(signal.SIGINT, sigint_handler)
 signal.signal(signal.SIGTERM, sigint_handler)
+
 
 def is_digit(n):
     try:
@@ -322,11 +360,13 @@ def is_digit(n):
     except ValueError:
         return False
 
+
 def inborders(n, min_value, max_value):
     return max(min(n, max_value), min_value)
 
+
 if __name__ == "__main__":
-    showHelp()
+    show_help()
 
     config_overview = "./config/3664_2748.cfg"
     config_focused = "./config/916_686.cfg"
@@ -334,12 +374,27 @@ if __name__ == "__main__":
     ret, handle = camera_initFromFile(config_overview)
     if ret:
         ArducamSDK.Py_ArduCam_setMode(handle, ArducamSDK.CONTINUOUS_MODE)
-        ArducamSDK.Py_ArduCam_writeSensorReg(handle, 0x0202, 100)
+        ArducamSDK.Py_ArduCam_writeSensorReg(handle, 0x0202, 200)
 
         ct = threading.Thread(target=captureImage_thread)
         ct.start()
 
+        parameters = None
+        if os.path.exists(settings_file):
+            with open(settings_file) as json_file:
+                parameters = json.load(json_file)
+
+                mouse_x = parameters["mouse_x"]
+                mouse_y = parameters["mouse_y"]
+                draw_x = parameters["draw_x"]
+                draw_y = parameters["draw_y"]
+
+                print("Loaded parameters - mouse: (%d; %d), draw: (%d; %d)." % (mouse_x, mouse_y, draw_x, draw_y))
+
         result = get_focus()
+
+        top_right_x = int(mouse_x - rectangle_width / 2)
+        top_right_y = int(mouse_y - rectangle_height / 2)
 
         running = False
         ct.join()
@@ -348,6 +403,8 @@ if __name__ == "__main__":
 
         if not result:
             exit()
+
+        print("Final parameters - mouse: (%d; %d), draw: (%d; %d)." % (mouse_x, mouse_y, draw_x, draw_y))
 
         time.sleep(1)
 
@@ -360,17 +417,26 @@ if __name__ == "__main__":
         ct.start()
         rt.start()
 
-        top_right_x = int(mouse_x - rectangle_width / 2)
-        top_right_y = int(mouse_y - rectangle_height / 2)
+        ArducamSDK.Py_ArduCam_writeSensorReg(handle, 0x0206, 146 / 4)  # analogue gain greenr
+        ArducamSDK.Py_ArduCam_writeSensorReg(handle, 0x0208, 162 / 4)  # analogue gain  red
+        ArducamSDK.Py_ArduCam_writeSensorReg(handle, 0x020a, 168 / 4)  # analogue gain  blue
+        ArducamSDK.Py_ArduCam_writeSensorReg(handle, 0x020c, 144 / 4)  # analogue gain  greenb
 
-        # print("mouse_x: %d" % (mouse_x))
-        # print("mouse_y: %d" % (mouse_y))
-        # print("top_right_x: %d" % (top_right_x))
-        # print("top_right_y: %d" % (top_right_y))
-        # print("rectangle_width: %d" % (rectangle_width))
-        # print("rectangle_height: %d" % (rectangle_height))
-        # print("screen_width: %d" % (screen_width))
-        # print("screen_height: %d" % (screen_height))
+        ArducamSDK.Py_ArduCam_writeSensorReg(handle, 0x020E, 256)  # digital gain greenr
+        ArducamSDK.Py_ArduCam_writeSensorReg(handle, 0x0210, 256)  # digital gain red
+        ArducamSDK.Py_ArduCam_writeSensorReg(handle, 0x0212, 256)  # digital gain blue
+        ArducamSDK.Py_ArduCam_writeSensorReg(handle, 0x0214, 256)  # digital gain greenb
+
+        if parameters is not None:
+            coarse_integration = parameters["coarse_integration"]
+
+            print("Loaded coarse_integration: %d." % (coarse_integration))
+        else:
+            coarse_integration = 400
+
+        shift_value = 100
+        horizontal_shift = 0
+        vertical_shift = 0
 
         horizontal_quotient = float(top_right_x) / float(screen_width)
         horizontal_base_shift = horizontal_quotient * 3660 - 746
@@ -379,75 +445,67 @@ if __name__ == "__main__":
         vertical_base_shift = vertical_quotient * 2779
         # 2063
 
-        # print("horizontal_quotient: %f" % (horizontal_quotient))
-        # print("vertical_quotient: %f" % (vertical_quotient))
-
-        ArducamSDK.Py_ArduCam_writeSensorReg(handle, 0x0206, 146 / 4) # analogue gain greenr
-        ArducamSDK.Py_ArduCam_writeSensorReg(handle, 0x0208, 162 / 4) # analogue gain  red
-        ArducamSDK.Py_ArduCam_writeSensorReg(handle, 0x020a, 168 / 4) # analogue gain  blue
-        ArducamSDK.Py_ArduCam_writeSensorReg(handle, 0x020c, 144 / 4) # analogue gain  greenb
-
-        ArducamSDK.Py_ArduCam_writeSensorReg(handle, 0x020E, 256) # digital gain greenr
-        ArducamSDK.Py_ArduCam_writeSensorReg(handle, 0x0210, 256) # digital gain red
-        ArducamSDK.Py_ArduCam_writeSensorReg(handle, 0x0212, 256) # digital gain blue
-        ArducamSDK.Py_ArduCam_writeSensorReg(handle, 0x0214, 256) # digital gain greenb
-
-        shift_value = 100
-        horizontal_shift = 0
-        vertical_shift = 0
-        coarse_integration = 400
         write_reg = True
         while running:
             if write_reg:
                 write_reg = False
+
+                # painfully reverse-engineered numbers
                 ArducamSDK.Py_ArduCam_writeSensorReg(handle, 0x0344, 112 + horizontal_base_shift + horizontal_shift)
                 ArducamSDK.Py_ArduCam_writeSensorReg(handle, 0x0348, 112 + 1672 + horizontal_base_shift + horizontal_shift)
                 ArducamSDK.Py_ArduCam_writeSensorReg(handle, 0x0346, 8 + 0 + vertical_base_shift + vertical_shift)
                 ArducamSDK.Py_ArduCam_writeSensorReg(handle, 0x034A, 8 + 685 + vertical_base_shift + vertical_shift)
                 ArducamSDK.Py_ArduCam_writeSensorReg(handle, 0x0202, coarse_integration)
 
-            # print("horizontal_base_shift: %d" % (horizontal_base_shift))
-            # print("vertical_base_shift: %d" % (vertical_base_shift))
-            # print("horizontal_shift: %d" % (horizontal_shift))
-            # print("vertical_shift: %d" % (vertical_shift))
-            # print("final horizontal: %d to %d" % (112 + horizontal_shift, 112 + 1672 + horizontal_shift))
-            # print("final vertical: %d to %d" % (8 + vertical_shift, 8 + 685 + vertical_shift))
-
-            # min column start: -748
-            # max column end:   3899 instead of 3871
-            # horizontal size:  1672
-            # min row start:    0
-            # max row start:    2779 instead of 2755
-            # vertical size:    685
-
             input_kb = str(sys.stdin.readline()).strip("\n")
 
-            if input_kb == 'q' or input_kb == 'Q':
+            if input_kb == 'h' or input_kb == 'H':
+                show_help()
+            elif input_kb == 'q' or input_kb == 'Q':
                 running = False
+                print("Exiting...")
+            elif input_kb == 't' or input_kb == 'T':
+                save_single_flag = True  # no output here
             elif input_kb == 's' or input_kb == 'S':
                 save_flag = True
+                save_beginning = time.time()
+                print("Recording started...")
             elif input_kb == 'c' or input_kb == 'C':
                 save_flag = False
-            elif input_kb == 'l' or input_kb == 'L': # move view to the left
+                print("Recording ended.")
+            elif input_kb == 'l' or input_kb == 'L':  # move view to the left
                 write_reg = True
                 horizontal_shift = horizontal_shift - shift_value
-            elif input_kb == 'r' or input_kb == 'R': # move view to the right
+            elif input_kb == 'r' or input_kb == 'R':  # move view to the right
                 write_reg = True
                 horizontal_shift = horizontal_shift + shift_value
-            elif input_kb == 'u' or input_kb == 'U': # move view up
+            elif input_kb == 'u' or input_kb == 'U':  # move view up
                 write_reg = True
                 vertical_shift = vertical_shift - shift_value
-            elif input_kb == 'd' or input_kb == 'D': # move view down
+            elif input_kb == 'd' or input_kb == 'D':  # move view down
                 write_reg = True
                 vertical_shift = vertical_shift + shift_value
-            elif input_kb == 'w' or input_kb == 'W': # increase coarse_integration (more white)
+            elif input_kb == 'w' or input_kb == 'W':  # increase coarse_integration (more white)
                 write_reg = True
                 coarse_integration = coarse_integration + 50
-                print("Coarse_integration is now %d (0x%X)" % (coarse_integration, coarse_integration))
-            elif input_kb == 'b' or input_kb == 'B': # decrease coarse_integration (more black)
+                print("Coarse_integration is now %d (0x%X)." % (coarse_integration, coarse_integration))
+            elif input_kb == 'b' or input_kb == 'B':  # decrease coarse_integration (more black)
                 write_reg = True
                 coarse_integration = coarse_integration - 50
-                print("Coarse_integration is now %d (0x%X)" % (coarse_integration, coarse_integration))
+                print("Coarse_integration is now %d (0x%X)." % (coarse_integration, coarse_integration))
+            elif input_kb == 'p' or input_kb == 'p':  # save the current parameters
+                parameters = {
+                    "mouse_x": mouse_x,
+                    "mouse_y": mouse_y,
+                    "draw_x": draw_x,
+                    "draw_y": draw_y,
+                    "coarse_integration": coarse_integration
+                }
+
+                with open('recording_settings.json', 'w') as out:
+                    json.dump(parameters, out, indent=4)
+
+                print("Saved the current parameters.")
             elif is_digit(input_kb):
                 shift_value = int(input_kb)
                 print("Changed shifting value to %d." % (shift_value))
@@ -455,6 +513,6 @@ if __name__ == "__main__":
         rt.join()
 
         if ArducamSDK.Py_ArduCam_close(handle) == 0:
-            print("Device close success!")
+            print("Sucessfully closed device!")
         else:
-            print("Device close fail!")
+            print("Failed to close device!")
