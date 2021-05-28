@@ -1,6 +1,9 @@
 import json
 import os
+import serial
+import serial.tools.list_ports
 import signal
+import struct
 import sys
 import threading
 import time
@@ -16,6 +19,7 @@ sys.setrecursionlimit(10 ** 9)
 settings_file = "recording_settings.json"
 
 running = True
+save_multiview = None
 save_single_flag = False
 save_flag = False
 save_beginning = 0
@@ -40,6 +44,33 @@ mouse_x = 0
 mouse_y = 0
 draw_x = None
 draw_y = None
+
+LED_MIDDLE = 12
+LED_ORDER = [0, 2, 4,
+             6, 8, 10,
+             12, 13, 15]
+LED_AVAILABLE = 16
+LED_DROP = False
+
+arduino = None
+
+
+def arduino_write_read(x):
+    if arduino is None:
+        print("WARNING: no Arduino was found!")
+    else:
+        # arduino.write(x.to_bytes(2, byteorder="big"))
+        arduino.write(struct.pack(">h", x))
+        arduino.flush()
+
+        return arduino.readline().decode("utf-8").strip()
+
+
+def get_multiview_components(input):
+    target = LED_ORDER[input % len(LED_ORDER)]
+    color = input // len(LED_ORDER)
+
+    return target, color
 
 
 def is_digit(n):
@@ -188,7 +219,7 @@ def capture_background():
 
 
 def readImage_thread():
-    global handle, running, width, height, save_single_flag, save_flag, save_beginning, save_raw, cfg, color_mode
+    global handle, running, width, height, save_multiview, LED_DROP, save_single_flag, save_flag, save_beginning, save_raw, cfg, color_mode
 
     time0 = time.time()
     time1 = time.time()
@@ -229,22 +260,52 @@ def readImage_thread():
 
             count += 1
 
-            if save_single_flag:
-                cv2.imwrite("images/_single%d.png" % single_count, image)
-                print("Single image #%d saved." % (single_count))
+            if save_multiview is not None:
+                if not LED_DROP:
+                    previous = save_multiview + 1
 
-                single_count += 1
+                    if save_multiview >= 0:
+                        target, color = get_multiview_components(save_multiview)
+                        print(arduino_write_read(color * LED_AVAILABLE + target))
+                        LED_DROP = True
 
-                save_single_flag = False
+                        if save_multiview != len(LED_ORDER) * 4 - 1:  # first pass
+                            target, color = get_multiview_components(previous)  # previous
 
-            if save_flag:
-                cv2.imwrite("images/image%d.png" % totalFrame, image)
+                            cv2.imwrite("images/_multi_%d_%d.png" % (target, color), image)
+                            print("Multiview image with led %d and color %d saved (raw: %d)." % (target, color, previous))
 
-                if save_raw:
-                    with open("images/image%d.raw" % totalFrame, 'wb') as f:
-                        f.write(data)
+                        save_multiview -= 1
+                    else:
+                        print("Middle led: %d." % (LED_MIDDLE))
+                        print(arduino_write_read(LED_MIDDLE))
+                        LED_DROP = True
 
-                totalFrame += 1
+                        target, color = get_multiview_components(previous)  # previous
+
+                        cv2.imwrite("images/_multi_%d_%d.png" % (target, color), image)
+                        print("Multiview image with led %d and color %d saved (raw: %d)." % (target, color, previous))
+
+                        save_multiview = None
+                else:
+                    LED_DROP = False
+            else:
+                if save_single_flag:
+                    cv2.imwrite("images/_single%d.png" % single_count, image)
+                    print("Single image #%d saved." % (single_count))
+
+                    single_count += 1
+
+                    save_single_flag = False
+
+                if save_flag:
+                    cv2.imwrite("images/image%d.png" % totalFrame, image)
+
+                    if save_raw:
+                        with open("images/image%d.raw" % totalFrame, 'wb') as f:
+                            f.write(data)
+
+                    totalFrame += 1
 
             image = cv2.resize(image, (width, height), interpolation=cv2.INTER_LINEAR)
 
@@ -363,6 +424,15 @@ def show_help():
 
 
 if __name__ == "__main__":
+    for port in list(serial.tools.list_ports.comports()):
+        if "Arduino" in port.description:
+            arduino = serial.Serial(port=port.device, baudrate=115200, timeout=1)
+
+            break
+
+    print(arduino_write_read(0))  # Wait for the Arduino to be initialized
+    time.sleep(1)
+
     show_help()
 
     config_overview = "./config/3664_2748.cfg"
@@ -372,6 +442,9 @@ if __name__ == "__main__":
     if ret:
         ArducamSDK.Py_ArduCam_setMode(handle, ArducamSDK.CONTINUOUS_MODE)
         ArducamSDK.Py_ArduCam_writeSensorReg(handle, 0x0202, 200)
+
+        print("Middle led: %d." % (LED_MIDDLE))
+        print(arduino_write_read(LED_MIDDLE))
 
         ct = threading.Thread(target=captureImage_thread)
         ct.start()
@@ -461,6 +534,8 @@ if __name__ == "__main__":
             elif input_kb == 'q' or input_kb == 'Q':
                 running = False
                 print("Exiting...")
+            elif input_kb == 'm' or input_kb == 'M':
+                save_multiview = len(LED_ORDER) * 4 - 1  # no output here
             elif input_kb == 't' or input_kb == 'T':
                 save_single_flag = True  # no output here
             elif input_kb == 's' or input_kb == 'S':
