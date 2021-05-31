@@ -9,6 +9,7 @@ import threading
 import time
 
 import cv2
+import numpy as np
 
 import arducam_config_parser
 import ArducamSDK
@@ -24,6 +25,7 @@ save_single_flag = False
 save_flag = False
 save_beginning = 0
 save_raw = False
+calibrate_flag = True
 cfg = {}
 handle = {}
 
@@ -45,25 +47,43 @@ mouse_y = 0
 draw_x = None
 draw_y = None
 
+coarse_integration = 400
+
 LED_MIDDLE = 12
 LED_ORDER = [0, 2, 4,
              6, 8, 10,
              12, 13, 15]
 LED_AVAILABLE = 16
-LED_DROP = False
+LED_MAX_ITERATIONS = len(LED_ORDER) * 4 - 1
+LED_DROP = 0
+
+calibrate_flag = None
+calibrate_start = 200
+calibrate_increase = 50
+calibrate_threshold = 5
+calibrate_cap = 6000
+calibrate_grey = None
+calibrate_target = None
+calibrate_color = None
+calibrate_at = calibrate_start
+calibrate_results = {}
 
 arduino = None
 
 
-def arduino_write_read(x):
+def arduino_write_read(target, color, display=False):
     if arduino is None:
         print("WARNING: no Arduino was found!")
     else:
-        # arduino.write(x.to_bytes(2, byteorder="big"))
-        arduino.write(struct.pack(">h", x))
+        arduino.write(struct.pack(">h", color * LED_AVAILABLE + target))
         arduino.flush()
 
-        return arduino.readline().decode("utf-8").strip()
+        result = arduino.readline().decode("utf-8").strip()
+
+        if display:
+            print(result)
+
+        return result
 
 
 def get_multiview_components(input):
@@ -219,7 +239,8 @@ def capture_background():
 
 
 def readImage_thread():
-    global handle, running, width, height, save_multiview, LED_DROP, save_single_flag, save_flag, save_beginning, save_raw, cfg, color_mode
+    global handle, running, width, height, save_multiview, LED_DROP, save_single_flag, save_flag, save_beginning, save_raw, cfg, color_mode, \
+           calibrate_flag, calibrate_grey, calibrate_at, calibrate_target, calibrate_color, calibrate_results
 
     time0 = time.time()
     time1 = time.time()
@@ -260,26 +281,87 @@ def readImage_thread():
 
             count += 1
 
-            if save_multiview is not None:
-                if not LED_DROP:
+            if LED_DROP > 0:
+                LED_DROP -= 1
+            else:
+                if calibrate_flag is not None:
+                    if calibrate_grey is None:  # first pass
+                        calibrate_grey = np.median(image)
+                        print("Target grey: %f." % (calibrate_grey))
+                    elif calibrate_flag >= 0:
+                        target, color = get_multiview_components(calibrate_flag)
+
+                        if target != calibrate_target or color != calibrate_color:
+                            calibrate_target = target
+                            calibrate_color = color
+
+                            arduino_write_read(target, color)
+                            ArducamSDK.Py_ArduCam_writeSensorReg(handle, 0x0202, calibrate_at)
+
+                            LED_DROP = 1
+                        else:
+                            current_grey = np.median(image)
+
+                            if current_grey + calibrate_threshold >= calibrate_grey or calibrate_at >= calibrate_cap:
+                                print("Calibration result for led %d and color %d (raw: %d): %d (current grey: %f)." % (target, color, calibrate_flag, calibrate_at, current_grey))
+
+                                if target not in calibrate_results.keys():
+                                    calibrate_results[target] = {color: calibrate_at}
+                                else:
+                                    calibrate_results[target][color] = calibrate_at
+
+                                calibrate_at = calibrate_start
+
+                                calibrate_flag -= 1
+                            else:
+                                calibrate_at += calibrate_increase  # TODO: adaptative increase
+
+                                ArducamSDK.Py_ArduCam_writeSensorReg(handle, 0x0202, calibrate_at)
+
+                                LED_DROP = 1
+                    else:
+                        print("Middle led: %d." % (LED_MIDDLE))
+                        arduino_write_read(LED_MIDDLE, 0)
+                        ArducamSDK.Py_ArduCam_writeSensorReg(handle, 0x0202, coarse_integration)
+                        LED_DROP = 1
+
+                        print("Calibration finished.")
+
+                        calibrate_flag = None
+                elif save_multiview is not None:
                     previous = save_multiview + 1
 
                     if save_multiview >= 0:
                         target, color = get_multiview_components(save_multiview)
-                        print(arduino_write_read(color * LED_AVAILABLE + target))
-                        LED_DROP = True
 
-                        if save_multiview != len(LED_ORDER) * 4 - 1:  # first pass
+                        if target in calibrate_results.keys():
+                            integration = calibrate_results[target][color]
+                        else:
+                            integration = coarse_integration
+
+                        arduino_write_read(target, color)
+                        ArducamSDK.Py_ArduCam_writeSensorReg(handle, 0x0202, integration)
+                        LED_DROP = 1
+
+                        if save_multiview != LED_MAX_ITERATIONS:  # first pass
                             target, color = get_multiview_components(previous)  # previous
 
+                            if target in calibrate_results.keys():
+                                integration = calibrate_results[target][color]
+                            else:
+                                integration = coarse_integration
+
+                            grey = np.median(image)
+
                             cv2.imwrite("images/_multi_%d_%d.png" % (target, color), image)
-                            print("Multiview image with led %d and color %d saved (raw: %d)." % (target, color, previous))
+                            print("Multiview image with led %d and color %d saved (raw: %d), with integration time: %d (grey: %f)." % (target, color, previous, integration, grey))
 
                         save_multiview -= 1
                     else:
                         print("Middle led: %d." % (LED_MIDDLE))
-                        print(arduino_write_read(LED_MIDDLE))
-                        LED_DROP = True
+                        arduino_write_read(LED_MIDDLE, 0)
+                        ArducamSDK.Py_ArduCam_writeSensorReg(handle, 0x0202, coarse_integration)  # reset integration to base value
+                        LED_DROP = 1
 
                         target, color = get_multiview_components(previous)  # previous
 
@@ -288,24 +370,22 @@ def readImage_thread():
 
                         save_multiview = None
                 else:
-                    LED_DROP = False
-            else:
-                if save_single_flag:
-                    cv2.imwrite("images/_single%d.png" % single_count, image)
-                    print("Single image #%d saved." % (single_count))
+                    if save_single_flag:
+                        cv2.imwrite("images/_single%d.png" % single_count, image)
+                        print("Single image #%d saved." % (single_count))
 
-                    single_count += 1
+                        single_count += 1
 
-                    save_single_flag = False
+                        save_single_flag = False
 
-                if save_flag:
-                    cv2.imwrite("images/image%d.png" % totalFrame, image)
+                    if save_flag:
+                        cv2.imwrite("images/image%d.png" % totalFrame, image)
 
-                    if save_raw:
-                        with open("images/image%d.raw" % totalFrame, 'wb') as f:
-                            f.write(data)
+                        if save_raw:
+                            with open("images/image%d.raw" % totalFrame, 'wb') as f:
+                                f.write(data)
 
-                    totalFrame += 1
+                        totalFrame += 1
 
             image = cv2.resize(image, (width, height), interpolation=cv2.INTER_LINEAR)
 
@@ -430,7 +510,11 @@ if __name__ == "__main__":
 
             break
 
-    print(arduino_write_read(0))  # Wait for the Arduino to be initialized
+    try:
+        arduino_write_read(0, 0)  # Wait for the Arduino to be initialized
+    except Exception:
+        pass
+
     time.sleep(1)
 
     show_help()
@@ -444,7 +528,7 @@ if __name__ == "__main__":
         ArducamSDK.Py_ArduCam_writeSensorReg(handle, 0x0202, 200)
 
         print("Middle led: %d." % (LED_MIDDLE))
-        print(arduino_write_read(LED_MIDDLE))
+        arduino_write_read(LED_MIDDLE, 0)
 
         ct = threading.Thread(target=captureImage_thread)
         ct.start()
@@ -499,10 +583,17 @@ if __name__ == "__main__":
 
         if parameters is not None:
             coarse_integration = parameters["coarse_integration"]
-
             print("Loaded coarse_integration: %d." % (coarse_integration))
-        else:
-            coarse_integration = 400
+
+            calibrate_results = {}
+            raw_calibration = parameters["calibration"]
+            for target, colors in raw_calibration.items():
+                entry = {}
+                for color, integration in colors.items():
+                    entry[int(color)] = integration
+
+                calibrate_results[int(target)] = entry
+            print("Loaded previous calibration parameters.")
 
         shift_value = 100
         horizontal_shift = 0
@@ -535,7 +626,7 @@ if __name__ == "__main__":
                 running = False
                 print("Exiting...")
             elif input_kb == 'm' or input_kb == 'M':
-                save_multiview = len(LED_ORDER) * 4 - 1  # no output here
+                save_multiview = LED_MAX_ITERATIONS  # no output here
             elif input_kb == 't' or input_kb == 'T':
                 save_single_flag = True  # no output here
             elif input_kb == 's' or input_kb == 'S':
@@ -565,22 +656,27 @@ if __name__ == "__main__":
                 write_reg = True
                 coarse_integration = coarse_integration - 50
                 print("Coarse_integration is now %d (0x%X)." % (coarse_integration, coarse_integration))
-            elif input_kb == 'p' or input_kb == 'p':  # save the current parameters
+            elif input_kb == 'p' or input_kb == 'P':  # save the current parameters
                 parameters = {
                     "mouse_x": mouse_x,
                     "mouse_y": mouse_y,
                     "draw_x": draw_x,
                     "draw_y": draw_y,
-                    "coarse_integration": coarse_integration
+                    "coarse_integration": coarse_integration,
+                    "calibration": calibrate_results
                 }
 
                 with open('recording_settings.json', 'w') as out:
                     json.dump(parameters, out, indent=4)
 
                 print("Saved the current parameters.")
+            elif input_kb == 'a' or input_kb == 'A':  # save the current parameters
+                calibrate_flag = LED_MAX_ITERATIONS
+                print("Recalibrating...")
             elif is_digit(input_kb):
                 shift_value = int(input_kb)
                 print("Changed shifting value to %d." % (shift_value))
+
         ct.join()
         rt.join()
 
