@@ -1,19 +1,18 @@
 import json
 import os
-import serial
-import serial.tools.list_ports
 import signal
 import struct
 import sys
 import threading
 import time
 
+import ArducamSDK
 import cv2
 import numpy as np
+import serial.tools.list_ports
 
-import arducam_config_parser
-import ArducamSDK
 import ImageConvert
+import arducam_config_parser
 
 sys.setrecursionlimit(10 ** 9)
 
@@ -219,7 +218,7 @@ def captureImage_thread():
 
 
 def capture_background():
-    global handle, running, width, height, cfg, color_mode, select, background_image
+    global handle, running, cfg, select, background_image
 
     while ArducamSDK.Py_ArduCam_availableImage(handle) == 0:
         time.sleep(0.001)
@@ -234,8 +233,7 @@ def capture_background():
     ArducamSDK.Py_ArduCam_del(handle)
 
     background_image = ImageConvert.convert_image(data, rtn_cfg, color_mode)
-    resized_image = cv2.resize(background_image, (screen_width, screen_height), interpolation=cv2.INTER_LINEAR)
-    return resized_image, background_image
+    return background_image
 
 
 def readImage_thread():
@@ -304,7 +302,7 @@ def readImage_thread():
 
                             if current_grey + calibrate_threshold >= calibrate_grey or calibrate_at >= calibrate_cap:
                                 print("Calibration result for led %d and color %d (raw: %d): %d (current grey: %f)." % (
-                                target, color, calibrate_flag, calibrate_at, current_grey))
+                                    target, color, calibrate_flag, calibrate_at, current_grey))
 
                                 if target not in calibrate_results.keys():
                                     calibrate_results[target] = {color: calibrate_at}
@@ -356,7 +354,7 @@ def readImage_thread():
 
                             cv2.imwrite("images/_multi_%d_%d.png" % (target, color), image)
                             print("Multiview image with led %d and color %d saved (raw: %d), with integration time: %d (grey: %f)." % (
-                            target, color, previous, integration, grey))
+                                target, color, previous, integration, grey))
 
                         save_multiview -= 1
                     else:
@@ -398,31 +396,30 @@ def readImage_thread():
             time.sleep(0.001)
 
 
-def draw_rectangle(output=True, original_size=False):
-    global select, background_image, draw_x, draw_y
+def draw_rectangle(image, resizing=1):
+    global select, draw_x, draw_y
 
     if draw_x is None or draw_y is None:
         return
 
-    blank = background_image.copy()
-    cv2.rectangle(blank,
+    copy = image.copy()
+    cv2.rectangle(copy,
                   (
-                      draw_x - int(rectangle_width / float(2)),
-                      draw_y - int(rectangle_height / float(2))
+                      draw_x - int(rectangle_width / resizing / float(2)),
+                      draw_y - int(rectangle_height / resizing / float(2))
                   ),
                   (
-                      draw_x + int(rectangle_width / float(2)),
-                      draw_y + int(rectangle_height / float(2))
+                      draw_x + int(rectangle_width / resizing / float(2)),
+                      draw_y + int(rectangle_height / resizing / float(2))
                   ),
                   (0, 0, 255),
                   1
                   )
 
-    cv2.imshow(select, blank)
-    return blank
+    return copy
 
 
-def mouse(event, x, y, flags, params):
+def mouse(event, x, y):
     global select, background_image, move_rectangle, mouse_x, mouse_y, draw_x, draw_y
     x = inborders(x, int(rectangle_width / 2), screen_width - int(rectangle_width / 2) - 1)
     y = inborders(y, int(rectangle_height / 2), screen_height - int(rectangle_height / 2) - 1)
@@ -434,7 +431,6 @@ def mouse(event, x, y, flags, params):
 
     if event == cv2.EVENT_LBUTTONDOWN:
         move_rectangle = True
-
     elif event == cv2.EVENT_MOUSEMOVE:
         if move_rectangle:
             mouse_x = shifted_x
@@ -442,7 +438,6 @@ def mouse(event, x, y, flags, params):
             draw_x = x
             draw_y = y
             display_rectangle = True
-
     elif event == cv2.EVENT_LBUTTONUP:
         move_rectangle = False
 
@@ -453,12 +448,11 @@ def mouse(event, x, y, flags, params):
         display_rectangle = True
 
     if display_rectangle:
-        display_rectangle = False
-        draw_rectangle()
+        cv2.imshow(select, draw_rectangle(background_image))
 
 
 def get_focus():
-    global handle, running, width, height, cfg, color_mode, select, background_image
+    global handle, running, cfg, select, background_image
 
     select = "Zone selection"
     cv2.namedWindow(select)
@@ -467,7 +461,11 @@ def get_focus():
     exited = False
     while True:
         background_image = capture_background()
-        overview = draw_rectangle()
+        rescaled = cv2.resize(background_image, (screen_width, screen_height), interpolation=cv2.INTER_LINEAR)
+
+        cv2.imshow(select, draw_rectangle(rescaled))
+
+        overview = draw_rectangle(background_image, resizing=resize_ratio)
 
         key = cv2.waitKey(10)
 
@@ -677,12 +675,12 @@ if __name__ == "__main__":
                 print("Recalibrating...")
             elif is_digit(input_kb):
                 shift_value = int(input_kb)
-                print("Changed shifting value to %d." % (shift_value))
+                print("Changed shifting value to %d." % shift_value)
 
         ct.join()
         rt.join()
 
         if ArducamSDK.Py_ArduCam_close(handle) == 0:
-            print("Sucessfully closed device!")
+            print("Successfully closed device!")
         else:
             print("Failed to close device!")
